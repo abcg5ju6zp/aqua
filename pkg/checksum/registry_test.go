@@ -57,64 +57,51 @@ func TestRegistryID(t *testing.T) {
 	}
 }
 
-func TestCheckRegistry(t *testing.T) {
+func TestVerifyRegistry(t *testing.T) {
 	t.Parallel()
-	data := []struct {
-		name     string
-		registry *aqua.Registry
-		content  []byte
-		wantErr  bool
-	}{
-		{
-			name: "new registry - no existing checksum",
-			registry: &aqua.Registry{
-				RepoOwner: "test",
-				RepoName:  "registry",
-				Ref:       pkgVersionV1,
-				Path:      "",
-			},
-			content: []byte("test content"),
-			wantErr: false,
-		},
-		{
-			name: "valid existing checksum",
-			registry: &aqua.Registry{
-				RepoOwner: "test2",
-				RepoName:  "registry2",
-				Ref:       pkgVersionV1,
-				Path:      "",
-			},
-			content: []byte("test content"),
-			wantErr: false,
-		},
+	regist := &aqua.Registry{
+		RepoOwner: "test",
+		RepoName:  "registry",
+		Ref:       pkgVersionV1,
+		Path:      "",
 	}
+	content := []byte("test content")
 
-	for _, d := range data {
-		t.Run(d.name, func(t *testing.T) {
-			t.Parallel()
-			checksums := checksum.New()
+	t.Run("new registry - no existing checksum", func(t *testing.T) {
+		t.Parallel()
+		algorithm, sum, err := checksum.VerifyRegistry(regist, checksum.New(), content)
+		if err != nil {
+			t.Fatalf("VerifyRegistry returned an error: %v", err)
+		}
+		if algorithm != "sha256" || sum == "" {
+			t.Errorf("unexpected algorithm or checksum: %s %s", algorithm, sum)
+		}
+	})
 
-			// For the second test, pre-populate with correct checksum
-			if d.name == "valid existing checksum" {
-				// First call to calculate and store the checksum
-				err := checksum.CheckRegistry(d.registry, checksums, d.content)
-				if err != nil {
-					t.Fatalf("First call failed: %v", err)
-				}
-			}
+	t.Run("checksum disabled", func(t *testing.T) {
+		t.Parallel()
+		if _, _, err := checksum.VerifyRegistry(regist, nil, content); err != nil {
+			t.Errorf("VerifyRegistry with nil checksums returned an error: %v", err)
+		}
+	})
 
-			err := checksum.CheckRegistry(d.registry, checksums, d.content)
-			if d.wantErr && err == nil {
-				t.Error("Expected error but got none")
-			}
-			if !d.wantErr && err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-		})
-	}
+	t.Run("valid existing checksum", func(t *testing.T) {
+		t.Parallel()
+		checksums := checksum.New()
+		_, sum, err := checksum.VerifyRegistry(regist, checksums, content)
+		if err != nil {
+			t.Fatalf("the first verification failed: %v", err)
+		}
+		// VerifyRegistry is read-only; the record is committed only after the
+		// content generation is published.
+		checksum.CommitRegistry(regist, checksums, "sha256", sum)
+		if _, _, err := checksum.VerifyRegistry(regist, checksums, content); err != nil {
+			t.Errorf("the second verification failed: %v", err)
+		}
+	})
 }
 
-func TestCheckRegistryWithMismatch(t *testing.T) {
+func TestVerifyRegistryWithMismatch(t *testing.T) {
 	t.Parallel()
 
 	registry := &aqua.Registry{
@@ -126,17 +113,17 @@ func TestCheckRegistryWithMismatch(t *testing.T) {
 
 	checksums := checksum.New()
 
-	// First, establish a checksum for one content
+	// First, establish a checksum for one content and commit it.
 	originalContent := []byte("original content")
-	err := checksum.CheckRegistry(registry, checksums, originalContent)
+	_, sum, err := checksum.VerifyRegistry(registry, checksums, originalContent)
 	if err != nil {
 		t.Fatalf("Failed to establish checksum: %v", err)
 	}
+	checksum.CommitRegistry(registry, checksums, "sha256", sum)
 
-	// Now try with different content - should fail
+	// Now try with different content - should fail and mutate nothing.
 	modifiedContent := []byte("modified content")
-	err = checksum.CheckRegistry(registry, checksums, modifiedContent)
-	if err == nil {
+	if _, _, err := checksum.VerifyRegistry(registry, checksums, modifiedContent); err == nil {
 		t.Error("Expected error for mismatched content but got none")
 	}
 }

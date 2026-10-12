@@ -1,6 +1,7 @@
 package checksum_test
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -144,6 +145,42 @@ func TestChecksums_UpdateFile(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestChecksums_UpdateFileLeavesNoTemporaryFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "aqua-checksums.json")
+	checksums := checksum.New()
+	checksums.Set(pkgFoo, &checksum.Checksum{ID: pkgFoo, Checksum: "xxx", Algorithm: algoSHA256})
+	if err := checksums.UpdateFile(p); err != nil {
+		t.Fatal(err)
+	}
+	// Update the existing file too: the replacement must be atomic and the
+	// directory must not keep temporary files.
+	checksums.Set("bar", &checksum.Checksum{ID: "bar", Checksum: "yyy", Algorithm: algoSHA256})
+	if err := checksums.UpdateFile(p); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".tmp" {
+			t.Fatalf("a temporary file was left behind: %s", e.Name())
+		}
+	}
+	read := checksum.New()
+	if err := read.ReadFile(p); err != nil {
+		t.Fatal(err)
+	}
+	if got := read.Get(pkgFoo); got == nil || got.Checksum != "XXX" {
+		t.Fatalf("unexpected persisted checksum: %v", got)
+	}
+	if read.Get("bar") == nil {
+		t.Fatal("the added checksum must be persisted")
 	}
 }
 

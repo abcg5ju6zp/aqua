@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/aquaproj/aqua/v2/pkg/checksum"
 	"github.com/aquaproj/aqua/v2/pkg/config/aqua"
 	"github.com/aquaproj/aqua/v2/pkg/config/registry"
-	"github.com/aquaproj/aqua/v2/pkg/osfile"
 	"github.com/suzuki-shunsuke/slog-error/slogerr"
 )
 
@@ -51,6 +49,9 @@ func (is *Installer) InstallRegistries(ctx context.Context, logger *slog.Logger,
 				return
 			}
 			registriesMutex.Lock()
+			// The cache index is populated only after the generation was fully
+			// downloaded, verified, parsed and published, so package references
+			// can never resolve against a half updated registry.
 			registryContents[registry.Name] = registryContent
 			registriesMutex.Unlock()
 			<-maxInstallChan
@@ -58,6 +59,10 @@ func (is *Installer) InstallRegistries(ctx context.Context, logger *slog.Logger,
 	}
 	wg.Wait()
 	if failed {
+		// Successfully installed sources keep their committed generations on
+		// disk, but packages depending on a failed source are not installed:
+		// returning an error makes the package phase fail closed instead of
+		// reading a half updated cache.
 		return nil, errInstallFailure
 	}
 
@@ -65,7 +70,7 @@ func (is *Installer) InstallRegistries(ctx context.Context, logger *slog.Logger,
 }
 
 // InstallRegistry installs and reads the registry file and returns the registry content.
-// If the registry file already exists, the installation is skipped.
+// If a complete generation of the registry already exists, it is used without network access.
 func (is *Installer) InstallRegistry(ctx context.Context, logger *slog.Logger, regist *aqua.Registry, cfgFilePath string, checksums *checksum.Checksums) (*registry.Config, error) {
 	if err := regist.Validate(); err != nil {
 		return nil, fmt.Errorf("validate the registry: %w", err)
@@ -87,29 +92,21 @@ func (is *Installer) InstallRegistry(ctx context.Context, logger *slog.Logger, r
 		return registryContent, nil
 	}
 
-	if !isJSON(registryFilePath) {
-		return is.handleYAMLGitHubContent(ctx, logger, regist, checksums, registryFilePath)
-	}
-
-	registryContent := &registry.Config{}
-	if err := is.readJSONRegistry(registryFilePath, registryContent); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		if err := osfile.MkdirAll(filepath.Dir(registryFilePath)); err != nil {
-			return nil, fmt.Errorf("create the parent directory of the configuration file: %w", err)
-		}
-		return is.getRegistry(ctx, logger, regist, registryFilePath, checksums)
-	}
-	return registryContent, nil
+	return is.installGitHubContentRegistry(ctx, logger, regist, registryFilePath, checksums)
 }
 
-// getRegistry downloads and installs the registry file.
-func (is *Installer) getRegistry(ctx context.Context, logger *slog.Logger, registry *aqua.Registry, registryFilePath string, checksums *checksum.Checksums) (*registry.Config, error) {
-	// TODO checksum verification
-	// TODO download checksum file
-	if registry.Type == aqua.RegistryTypeGitHubContent {
-		return is.getGitHubContentRegistry(ctx, logger, registry, registryFilePath, checksums)
+// lockRegistrySource serializes installs targeting the same cached registry
+// within the process (e.g. the same source referenced from global and local
+// configuration). Cross process safety is provided by isolated staging
+// directories and the atomic generation pointer switch.
+func (is *Installer) lockRegistrySource(registryFilePath string) func() {
+	is.sourceLocksMu.Lock()
+	l, ok := is.sourceLocks[registryFilePath]
+	if !ok {
+		l = &sourceMutex{}
+		is.sourceLocks[registryFilePath] = l
 	}
-	return nil, errUnsupportedRegistryType
+	is.sourceLocksMu.Unlock()
+	l.mu.Lock()
+	return l.mu.Unlock
 }

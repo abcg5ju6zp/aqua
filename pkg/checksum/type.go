@@ -162,13 +162,6 @@ func (c *Checksums) UpdateFile(p string) error {
 	if !c.changed {
 		return nil
 	}
-	f, err := os.Create(p)
-	if err != nil {
-		return fmt.Errorf("create a checksum file: %w", err)
-	}
-	defer f.Close()
-	encoder := json.NewEncoder(f)
-	encoder.SetIndent("", "  ")
 	arr := make([]*Checksum, 0, len(c.m))
 	for _, chk := range c.m {
 		arr = append(arr, chk)
@@ -182,8 +175,17 @@ func (c *Checksums) UpdateFile(p string) error {
 	if c.stdout != nil {
 		fmt.Fprintln(c.stdout, p)
 	}
-	if err := encoder.Encode(chkJSON); err != nil {
-		return fmt.Errorf("write a checksum file as JSON: %w", err)
+	// Write to a temporary file and rename it into place so a crash can never
+	// leave a partially written checksum file that pairs with unrelated content.
+	if err := osfile.WriteFileAtomic(p, osfile.FilePermission, func(f *os.File) error {
+		encoder := json.NewEncoder(f)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(chkJSON); err != nil {
+			return fmt.Errorf("write a checksum file as JSON: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("create a checksum file: %w", err)
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"log/slog"
+	"sync"
 
 	"github.com/aquaproj/aqua/v2/pkg/config"
 	"github.com/aquaproj/aqua/v2/pkg/config/registry"
@@ -19,6 +20,13 @@ type Installer struct {
 	cosign             CosignVerifier
 	slsaVerifier       SLSAVerifier
 	rt                 *runtime.Runtime
+	sourceLocksMu      sync.Mutex
+	sourceLocks        map[string]*sourceMutex
+}
+
+// sourceMutex serializes installs of one registry source within the process.
+type sourceMutex struct {
+	mu sync.Mutex
 }
 
 func New(param *config.Param, downloader GitHubContentFileDownloader, rt *runtime.Runtime, cos CosignVerifier, slsaVerifier SLSAVerifier) *Installer {
@@ -28,6 +36,7 @@ func New(param *config.Param, downloader GitHubContentFileDownloader, rt *runtim
 		rt:                 rt,
 		cosign:             cos,
 		slsaVerifier:       slsaVerifier,
+		sourceLocks:        map[string]*sourceMutex{},
 	}
 }
 

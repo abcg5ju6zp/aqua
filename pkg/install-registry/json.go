@@ -1,61 +1,25 @@
 package registry
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/aquaproj/aqua/v2/pkg/checksum"
-	"github.com/aquaproj/aqua/v2/pkg/config/aqua"
 	"github.com/aquaproj/aqua/v2/pkg/config/registry"
 	"github.com/aquaproj/aqua/v2/pkg/osfile"
-	"github.com/suzuki-shunsuke/slog-error/slogerr"
 )
 
-func (is *Installer) handleYAMLGitHubContent(ctx context.Context, logger *slog.Logger, regist *aqua.Registry, checksums *checksum.Checksums, registryFilePath string) (*registry.Config, error) {
-	jsonPath := registryFilePath + jsonSuffix
-	registryContent := &registry.Config{}
-	if err := is.readJSONRegistry(jsonPath, registryContent); err != nil { //nolint:nestif
-		if !errors.Is(err, os.ErrNotExist) {
-			slogerr.WithError(logger, err).Warn("failed to read a registry JSON file. Will remove and recreate the file", "registry_json_path", jsonPath)
-			if err := os.Remove(jsonPath); err != nil {
-				slogerr.WithError(logger, err).Warn("failed to remove a registry JSON file", "registry_json_path", jsonPath)
-			} else {
-				logger.Debug("remove a registry JSON file",
-					"registry_json_path", jsonPath)
-			}
-		}
-		if err := is.readYAMLRegistry(registryFilePath, registryContent); err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return nil, err
-			}
-			if err := osfile.MkdirAll(filepath.Dir(registryFilePath)); err != nil {
-				return nil, fmt.Errorf("create the parent directory of the configuration file: %w", err)
-			}
-			registryContent, err := is.getRegistry(ctx, logger, regist, registryFilePath, checksums)
-			if err != nil {
-				return nil, err
-			}
-			return registryContent, is.createJSON(jsonPath, registryContent)
-		}
-		return registryContent, is.createJSON(jsonPath, registryContent)
-	}
-	return registryContent, nil
-}
-
+// createJSON writes the converted registry JSON cache atomically, so a crash
+// can never leave a truncated cache next to a valid registry file.
 func (is *Installer) createJSON(jsonPath string, content *registry.Config) error {
-	jsonFile, err := os.Create(jsonPath)
-	if err != nil {
+	if err := osfile.WriteFileAtomic(jsonPath, registryFilePermission, func(f *os.File) error {
+		if err := json.NewEncoder(f).Encode(content); err != nil {
+			return fmt.Errorf("encode a registry as JSON: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("create a file to convert registry YAML to JSON: %w", err)
-	}
-	defer jsonFile.Close()
-	if err := json.NewEncoder(jsonFile).Encode(content); err != nil {
-		return fmt.Errorf("encode a registry as JSON: %w", err)
 	}
 	return nil
 }
