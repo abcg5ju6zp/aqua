@@ -213,8 +213,8 @@ func (c *Controller) removePackage(logger *slog.Logger, rootDir string, pkg *reg
 		if err := c.removePath(logger, rootDir, path); err != nil {
 			return err
 		}
-		if err := c.removeMetadataPath(logger, rootDir, path); err != nil {
-			return err
+		if err := c.vacuum.PurgePath(logger, path); err != nil {
+			return fmt.Errorf("purge tracking files: %w", err)
 		}
 	}
 	return gErr
@@ -222,21 +222,6 @@ func (c *Controller) removePackage(logger *slog.Logger, rootDir string, pkg *reg
 
 func (c *Controller) removePath(logger *slog.Logger, rootDir string, path string) error {
 	pkgPath := filepath.Join(rootDir, "pkgs", path)
-	arr, err := filepath.Glob(pkgPath)
-	if err != nil {
-		return fmt.Errorf("find directories: %w", err)
-	}
-	for _, p := range arr {
-		logger.Debug("removing a directory", "removed_path", p)
-		if err := os.RemoveAll(p); err != nil {
-			return fmt.Errorf("remove directories: %w", err)
-		}
-	}
-	return nil
-}
-
-func (c *Controller) removeMetadataPath(logger *slog.Logger, rootDir string, path string) error {
-	pkgPath := filepath.Join(rootDir, "metadata", "pkgs", path)
 	arr, err := filepath.Glob(pkgPath)
 	if err != nil {
 		return fmt.Errorf("find directories: %w", err)
@@ -288,6 +273,9 @@ func (c *Controller) removeAll(rootDir string) error {
 	}
 	if err := os.RemoveAll(filepath.Join(rootDir, "metadata")); err != nil {
 		return fmt.Errorf("remove all package metadata: %w", err)
+	}
+	if err := os.RemoveAll(filepath.Join(rootDir, "quarantine")); err != nil {
+		return fmt.Errorf("remove the quarantine directory: %w", err)
 	}
 	return gErr
 }

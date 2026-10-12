@@ -14,6 +14,7 @@ import (
 	"github.com/aquaproj/aqua/v2/pkg/installpackage"
 	"github.com/aquaproj/aqua/v2/pkg/osexec"
 	"github.com/aquaproj/aqua/v2/pkg/policy"
+	"github.com/aquaproj/aqua/v2/pkg/vacuum/lock"
 	"github.com/suzuki-shunsuke/go-osenv/osenv"
 )
 
@@ -33,6 +34,9 @@ type Controller struct {
 
 type Vacuum interface {
 	Update(pkgPath string, timestamp time.Time) error
+	// AcquireLease with exec=true returns a lease inherited by the executed
+	// tool across execve(2); it is released by the kernel when the tool exits.
+	AcquireLease(pkgPath string, exec bool) (lock.Handle, error)
 }
 
 type Installer interface {

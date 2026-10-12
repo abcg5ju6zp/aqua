@@ -1157,15 +1157,60 @@ func InitializeRemoveCommandController(ctx context.Context, logger *slog.Logger,
 	return &remove.Controller{}, nil
 }
 
-func InitializeVacuumCommandController(ctx context.Context, param *config.Param, rt *runtime.Runtime) *cvacuum.Controller {
+func InitializeVacuumCommandController(ctx context.Context, logger *slog.Logger, param *config.Param, rt *runtime.Runtime, httpClient *http.Client) (*cvacuum.Controller, error) {
 	wire.Build(
 		cvacuum.New,
 		wire.NewSet(
 			vacuum.New,
 			wire.Bind(new(cvacuum.Vacuum), new(*vacuum.Client)),
 		),
+		wire.NewSet(
+			finder.NewConfigFinder,
+			wire.Bind(new(cvacuum.ConfigFinder), new(*finder.ConfigFinder)),
+		),
+		wire.NewSet(
+			reader.New,
+			wire.Bind(new(cvacuum.ConfigReader), new(*reader.ConfigReader)),
+		),
+		wire.NewSet(
+			registry.New,
+			wire.Bind(new(cvacuum.RegistryInstaller), new(*registry.Installer)),
+		),
+		wire.NewSet(
+			github.New,
+			wire.Bind(new(download.GitHub), new(*github.RepositoriesService)),
+			wire.Bind(new(download.GitHubContentAPI), new(*github.RepositoriesService)),
+		),
+		wire.NewSet(
+			download.NewGitHubContentFileDownloader,
+			wire.Bind(new(registry.GitHubContentFileDownloader), new(*download.GitHubContentFileDownloader)),
+		),
+		download.NewHTTPDownloader,
+		wire.NewSet(
+			download.NewDownloader,
+			wire.Bind(new(download.ClientAPI), new(*download.Downloader)),
+		),
+		wire.NewSet(
+			cosign.NewVerifier,
+			wire.Bind(new(installpackage.CosignVerifier), new(*cosign.Verifier)),
+			wire.Bind(new(registry.CosignVerifier), new(*cosign.Verifier)),
+		),
+		wire.NewSet(
+			osexec.New,
+			wire.Bind(new(cosign.Executor), new(*osexec.Executor)),
+			wire.Bind(new(slsa.CommandExecutor), new(*osexec.Executor)),
+		),
+		wire.NewSet(
+			slsa.New,
+			wire.Bind(new(installpackage.SLSAVerifier), new(*slsa.Verifier)),
+			wire.Bind(new(registry.SLSAVerifier), new(*slsa.Verifier)),
+		),
+		wire.NewSet(
+			slsa.NewExecutor,
+			wire.Bind(new(slsa.Executor), new(*slsa.ExecutorImpl)),
+		),
 	)
-	return &cvacuum.Controller{}
+	return &cvacuum.Controller{}, nil
 }
 
 func InitializeVacuumInitCommandController(ctx context.Context, logger *slog.Logger, param *config.Param, rt *runtime.Runtime, httpClient *http.Client) (*initialize.Controller, error) {

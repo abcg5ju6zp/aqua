@@ -18,6 +18,7 @@ import (
 	"github.com/aquaproj/aqua/v2/pkg/osfile"
 	"github.com/aquaproj/aqua/v2/pkg/policy"
 	"github.com/aquaproj/aqua/v2/pkg/runtime"
+	"github.com/aquaproj/aqua/v2/pkg/vacuum/lock"
 	"github.com/suzuki-shunsuke/go-error-with-exit-code/ecerror"
 	"github.com/suzuki-shunsuke/slog-error/slogerr"
 )
@@ -60,11 +61,21 @@ func (c *Controller) Exec(ctx context.Context, logger *slog.Logger, param *confi
 		return err //nolint:wrapcheck
 	}
 
-	if param.DisableLazyInstall {
-		if _, err := os.Stat(findResult.ExePath); err != nil {
-			return slogerr.With(errExecNotFoundDisableLazyInstall, "doc", "https://aquaproj.github.io/docs/reference/codes/006") //nolint:wrapcheck
-		}
+	if err := c.checkExecutableWhenLazyInstallDisabled(param, findResult.ExePath); err != nil {
+		return err
 	}
+
+	// The exec lease covers the lazy install and the tool execution. On the
+	// execve path the deferred Release never runs because the aqua image is
+	// replaced; the descriptor survives exec and the kernel releases the lock
+	// when the tool exits. On the child process path the deferred call releases
+	// it after the tool exits.
+	lease, err := c.acquireExecLease(ctx, logger, findResult.Package)
+	if err != nil {
+		return err
+	}
+	defer c.releaseLease(logger, lease)
+
 	if err := c.install(ctx, logger, findResult, policyCfgs, param); err != nil {
 		return err
 	}
@@ -107,6 +118,59 @@ func (c *Controller) updateTimestamp(ctx context.Context, pkg *config.Package) e
 	}
 	if err := c.vacuum.Update(pkgPath, time.Now()); err != nil {
 		return fmt.Errorf("update the last used datetime: %w", err)
+	}
+	return nil
+}
+
+const (
+	execLeaseMaxRetry      = 50
+	execLeaseRetryInterval = 10 * time.Millisecond
+)
+
+// acquireExecLease resolves the package path and acquires the exec lease.
+func (c *Controller) acquireExecLease(ctx context.Context, logger *slog.Logger, pkg *config.Package) (lock.Handle, error) {
+	pkgPath, err := pkg.PkgPath(runtime.New(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("get a package path: %w", err)
+	}
+	return c.acquireLease(ctx, logger, pkgPath), nil
+}
+
+// acquireLease acquires the exec lease with a bounded wait for a running
+// vacuum. It never fails execution: if the lease can't be acquired, a no-op
+// lease is returned and the command runs anyway.
+func (c *Controller) acquireLease(ctx context.Context, logger *slog.Logger, pkgPath string) lock.Handle {
+	for i := range execLeaseMaxRetry + 1 {
+		lease, err := c.vacuum.AcquireLease(pkgPath, true)
+		if err == nil {
+			return lease
+		}
+		if !errors.Is(err, lock.ErrLocked) || i == execLeaseMaxRetry {
+			slogerr.WithError(logger, err).Warn("acquire a package lease")
+			return lock.NoopHandle()
+		}
+		if err := wait(ctx, execLeaseRetryInterval); err != nil {
+			slogerr.WithError(logger, err).Warn("give up acquiring a package lease")
+			return lock.NoopHandle()
+		}
+	}
+	return lock.NoopHandle()
+}
+
+func (c *Controller) releaseLease(logger *slog.Logger, lease lock.Handle) {
+	if err := lease.Release(); err != nil {
+		slogerr.WithError(logger, err).Warn("release a package lease")
+	}
+}
+
+// checkExecutableWhenLazyInstallDisabled enforces the documented error code
+// when lazy install is disabled and the executable doesn't exist.
+func (c *Controller) checkExecutableWhenLazyInstallDisabled(param *config.Param, exePath string) error {
+	if !param.DisableLazyInstall {
+		return nil
+	}
+	if _, err := os.Stat(exePath); err != nil {
+		return slogerr.With(errExecNotFoundDisableLazyInstall, "doc", "https://aquaproj.github.io/docs/reference/codes/006") //nolint:wrapcheck
 	}
 	return nil
 }

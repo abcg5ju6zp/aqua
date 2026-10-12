@@ -60,5 +60,7 @@ type RegistryInstaller interface {
 }
 
 type Vacuum interface {
-	Remove(pkgPath string) error
+	// PurgePath removes timestamp, lease, journal and quarantine artifacts
+	// matching the package glob pattern.
+	PurgePath(logger *slog.Logger, path string) error
 }

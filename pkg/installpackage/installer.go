@@ -2,6 +2,7 @@ package installpackage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/aquaproj/aqua/v2/pkg/slsa"
 	"github.com/aquaproj/aqua/v2/pkg/template"
 	"github.com/aquaproj/aqua/v2/pkg/unarchive"
+	"github.com/aquaproj/aqua/v2/pkg/vacuum/lock"
 	"github.com/suzuki-shunsuke/slog-error/slogerr"
 	"golang.org/x/sync/errgroup"
 )
@@ -64,7 +66,16 @@ type Installer struct {
 
 type Vacuum interface {
 	Update(pkgPath string, timestamp time.Time) error
+	// AcquireLease acquires a lease that tells vacuum whether the package
+	// version is being installed or executed. If exec is true, the lease stays
+	// alive across execve(2) until the executed tool exits.
+	AcquireLease(pkgPath string, exec bool) (lock.Handle, error)
 }
+
+const (
+	leaseMaxRetry      = 50
+	leaseRetryInterval = 100 * time.Millisecond
+)
 
 func New(param *config.Param, downloader download.ClientAPI, rt *runtime.Runtime, linker Linker, chkDL download.ChecksumDownloader, chkCalc ChecksumCalculator, unarchiver Unarchiver, cosignVerifier CosignVerifier, slsaVerifier SLSAVerifier, minisignVerifier MinisignVerifier, packslipVerifier PackslipVerifier, ghVerifier GitHubArtifactAttestationsVerifier, goInstallInstaller GoInstallInstaller, goBuildInstaller GoBuildInstaller, cargoPackageInstaller CargoPackageInstaller, vacuum Vacuum) *Installer {
 	// realRT is the actual host runtime, shared across the main installer and
@@ -283,10 +294,25 @@ func (is *Installer) InstallPackage(ctx context.Context, logger *slog.Logger, pa
 		return fmt.Errorf("render the asset name: %w", err)
 	}
 
+	relPkgPath, err := pkg.PkgPath(is.runtime)
+	if err != nil {
+		return fmt.Errorf("get the package path: %w", err)
+	}
 	pkgPath, err := pkg.AbsPkgPath(is.rootDir, is.runtime)
 	if err != nil {
 		return fmt.Errorf("get the package install path: %w", err)
 	}
+
+	// Hold an install lease around the existence check, download and file
+	// checks. Vacuum takes an exclusive lease before quarantining a version, so
+	// it either waits for this install or the re-check below re-stats a
+	// directory vacuum has moved away and re-downloads it.
+	lease := is.acquireLease(ctx, logger, relPkgPath, false)
+	defer func() {
+		if err := lease.Release(); err != nil {
+			slogerr.WithError(logger, err).Warn("release a package lease")
+		}
+	}()
 
 	if err := is.downloadWithRetry(ctx, logger, &DownloadParam{
 		Package:         pkg,
@@ -300,4 +326,31 @@ func (is *Installer) InstallPackage(ctx context.Context, logger *slog.Logger, pa
 	}
 
 	return is.checkFilesWrap(ctx, logger, param, pkgPath)
+}
+
+// acquireLease acquires a package lease with a bounded wait for a running
+// vacuum. Locks are advisory: if the lease still can't be acquired (a stale
+// lock on a flaky filesystem, a read-only metadata directory, ...), a no-op
+// lease is returned and installation proceeds; the atomic temp-directory
+// publish keeps concurrent installs safe anyway.
+func (is *Installer) acquireLease(ctx context.Context, logger *slog.Logger, pkgPath string, exec bool) lock.Handle {
+	for i := range leaseMaxRetry + 1 {
+		lease, err := is.vacuum.AcquireLease(pkgPath, exec)
+		if err == nil {
+			return lease
+		}
+		if !errors.Is(err, lock.ErrLocked) || i == leaseMaxRetry {
+			slogerr.WithError(logger, err).Warn("acquire a package lease")
+			return lock.NoopHandle()
+		}
+		timer := time.NewTimer(leaseRetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			slogerr.WithError(logger, ctx.Err()).Warn("give up acquiring a package lease")
+			return lock.NoopHandle()
+		case <-timer.C:
+		}
+	}
+	return lock.NoopHandle()
 }

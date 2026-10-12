@@ -1,6 +1,7 @@
 package vacuum
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/aquaproj/aqua/v2/pkg/config"
 	"github.com/aquaproj/aqua/v2/pkg/osfile"
+	"github.com/aquaproj/aqua/v2/pkg/vacuum/lock"
 	"github.com/suzuki-shunsuke/slog-error/slogerr"
 )
 
@@ -23,6 +25,13 @@ const (
 	filePermission = 0o664
 	fileName       = "timestamp.txt"
 	baseDir        = "metadata"
+
+	leasesDirName     = "leases"
+	lockFileName      = "lock"
+	stateDirName      = "vacuum"
+	journalDirName    = "journal"
+	quarantineDirName = "quarantine"
+	binDirName        = "bin"
 )
 
 func FormatTime(t time.Time) string {
@@ -35,25 +44,30 @@ func ParseTime(s string) (time.Time, error) {
 
 type Client struct {
 	rootDir string
-	// updateDisabled disables only Update, which is called on every package
-	// execution and installation. Create and FindAll are called from the vacuum
-	// commands, which are rejected by the CLI if AQUA_DISABLE_TRACKING is set, and
-	// Remove is also called from the remove command to clean up a timestamp file
-	// of a removed package.
+	// metadataDir is $AQUA_ROOT_DIR/metadata. Timestamp files, lease records and
+	// the vacuum journal live under it so that a read-only pkgs directory can
+	// still coexist with a writable metadata directory.
+	metadataDir    string
 	updateDisabled bool
+	host           string
+	// shimTargets is lazily populated once per Client by scanning the bin
+	// directory. A Client is used by a single vacuum run.
+	shimTargets []string
 }
 
 func New(param *config.Param) *Client {
+	host, _ := os.Hostname() // best effort; the host name is diagnostic only
 	return &Client{
-		rootDir:        filepath.Join(param.RootDir, baseDir),
+		rootDir:        param.RootDir,
+		metadataDir:    filepath.Join(param.RootDir, baseDir),
 		updateDisabled: param.DisableTracking,
+		host:           host,
 	}
 }
 
 func (c *Client) Remove(pkgPath string) error {
-	file := c.file(pkgPath)
-	if err := os.Remove(file); err != nil {
-		return fmt.Errorf("reamove a package timestamp file: %w", err)
+	if err := os.Remove(c.file(pkgPath)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove a package timestamp file: %w", err)
 	}
 	return nil
 }
@@ -80,7 +94,7 @@ func (c *Client) Create(pkgPath string, timestamp time.Time) error {
 
 func (c *Client) FindAll(logger *slog.Logger) (map[string]time.Time, error) {
 	timestamps := map[string]time.Time{}
-	if err := filepath.WalkDir(filepath.Join(c.rootDir, "pkgs"), func(path string, entry fs.DirEntry, err error) error {
+	if err := filepath.WalkDir(filepath.Join(c.metadataDir, "pkgs"), func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("walk directory to find timestamp files: %w", err)
 		}
@@ -102,16 +116,56 @@ func (c *Client) FindAll(logger *slog.Logger) (map[string]time.Time, error) {
 			}
 			return nil
 		}
-		rel, err := filepath.Rel(c.rootDir, filepath.Dir(path))
+		rel, err := filepath.Rel(c.metadataDir, filepath.Dir(path))
 		if err != nil {
 			return fmt.Errorf("get a relative file path: %w", err)
 		}
-		timestamps[rel] = t
+		timestamps[filepath.ToSlash(rel)] = t
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("find timestamp files: %w", err)
 	}
 	return timestamps, nil
+}
+
+// ReadTimestamp reads the timestamp of a package. It returns false if the
+// timestamp file doesn't exist. Vacuum re-reads it while holding the exclusive
+// lease so that a concurrent lease renewal is observed.
+func (c *Client) ReadTimestamp(pkgPath string) (time.Time, bool, error) {
+	b, err := os.ReadFile(c.file(pkgPath))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return time.Time{}, false, nil
+		}
+		return time.Time{}, false, fmt.Errorf("read a timestamp file: %w", err)
+	}
+	t, err := ParseTime(strings.TrimSpace(string(b)))
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("parse a timestamp file: %w", err)
+	}
+	return t, true, nil
+}
+
+// LockVacuum acquires the process-wide vacuum lock. Only one vacuum runs per
+// $AQUA_ROOT_DIR; the acquisition is non-blocking because a blocking lock may
+// hang CI forever if another vacuum is stuck.
+func (c *Client) LockVacuum() (lock.Handle, error) {
+	if err := osfile.MkdirAll(c.stateDir()); err != nil {
+		return nil, fmt.Errorf("create the vacuum state directory: %w", err)
+	}
+	h, err := lock.Acquire(filepath.Join(c.stateDir(), lockFileName), true, false)
+	if err != nil {
+		if errors.Is(err, lock.ErrLocked) {
+			return nil, ErrVacuumRunning
+		}
+		return nil, fmt.Errorf("acquire the vacuum lock: %w", err)
+	}
+	return h, nil
+}
+
+// SrcPath is the absolute path of an installed package version.
+func (c *Client) SrcPath(pkgPath string) string {
+	return c.srcPath(pkgPath)
 }
 
 func (c *Client) update(file, dir string, timestamp time.Time) error {
@@ -126,9 +180,33 @@ func (c *Client) update(file, dir string, timestamp time.Time) error {
 }
 
 func (c *Client) dir(pkgPath string) string {
-	return filepath.Join(c.rootDir, pkgPath)
+	return filepath.Join(c.metadataDir, filepath.FromSlash(pkgPath))
 }
 
 func (c *Client) file(pkgPath string) string {
 	return filepath.Join(c.dir(pkgPath), fileName)
+}
+
+func (c *Client) leaseDir(pkgPath string) string {
+	return filepath.Join(c.metadataDir, leasesDirName, filepath.FromSlash(pkgPath))
+}
+
+func (c *Client) leaseLockFile(pkgPath string) string {
+	return filepath.Join(c.leaseDir(pkgPath), lockFileName)
+}
+
+func (c *Client) stateDir() string {
+	return filepath.Join(c.metadataDir, stateDirName)
+}
+
+func (c *Client) journalDir() string {
+	return filepath.Join(c.stateDir(), journalDirName)
+}
+
+func (c *Client) srcPath(pkgPath string) string {
+	return filepath.Join(c.rootDir, filepath.FromSlash(pkgPath))
+}
+
+func (c *Client) quarantinePath(pkgPath string) string {
+	return filepath.Join(c.rootDir, quarantineDirName, filepath.FromSlash(pkgPath))
 }

@@ -136,8 +136,11 @@ func (i *command) action(ctx context.Context, args *Args) error {
 		return errors.New("vacuum days must be greater than 0")
 	}
 
-	ctrl := controller.InitializeVacuumCommandController(ctx, param, i.r.Runtime)
-	if err := ctrl.Vacuum(logger.Logger, param); err != nil {
+	ctrl, err := controller.InitializeVacuumCommandController(ctx, logger.Logger, param, i.r.Runtime, &http.Client{})
+	if err != nil {
+		return fmt.Errorf("initialize a VacuumController: %w", err)
+	}
+	if err := ctrl.Vacuum(ctx, logger.Logger, param); err != nil {
 		return err //nolint:wrapcheck
 	}
 	return nil

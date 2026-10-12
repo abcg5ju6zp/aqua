@@ -463,10 +463,24 @@ func InitializeRemoveCommandController(ctx context.Context, logger *slog.Logger,
 	return removeController, nil
 }
 
-func InitializeVacuumCommandController(ctx context.Context, param *config.Param, rt *runtime.Runtime) *vacuum2.Controller {
+func InitializeVacuumCommandController(ctx context.Context, logger *slog.Logger, param *config.Param, rt *runtime.Runtime, httpClient *http.Client) (*vacuum2.Controller, error) {
 	client := vacuum.New(param)
-	controller := vacuum2.New(param, rt, client)
-	return controller
+	configFinder := finder.NewConfigFinder()
+	configReader := reader.New(param)
+	v, err := github.New(ctx, logger)
+	if err != nil {
+		return nil, err
+	}
+	httpDownloader := download.NewHTTPDownloader(logger, httpClient)
+	gitHubContentFileDownloader := download.NewGitHubContentFileDownloader(v, httpDownloader)
+	executor := osexec.New()
+	downloader := download.NewDownloader(v, httpDownloader)
+	verifier := cosign.NewVerifier(executor, downloader, param)
+	executorImpl := slsa.NewExecutor(executor, param)
+	slsaVerifier := slsa.New(downloader, executorImpl)
+	installer := registry.New(param, gitHubContentFileDownloader, rt, verifier, slsaVerifier)
+	controller := vacuum2.New(param, rt, client, configFinder, configReader, installer)
+	return controller, nil
 }
 
 func InitializeVacuumInitCommandController(ctx context.Context, logger *slog.Logger, param *config.Param, rt *runtime.Runtime, httpClient *http.Client) (*initialize.Controller, error) {
