@@ -111,14 +111,18 @@ func (c *Controller) updateTimestamp(ctx context.Context, pkg *config.Package) e
 	return nil
 }
 
-func (c *Controller) install(ctx context.Context, logger *slog.Logger, findResult *which.FindResult, policies []*policy.Config, param *config.Param) error {
+func (c *Controller) install(ctx context.Context, logger *slog.Logger, findResult *which.FindResult, policies []*policy.Config, param *config.Param) (namedErr error) {
 	checksums, updateChecksum, err := checksum.Open(
 		logger, findResult.ConfigFilePath,
 		param.ChecksumEnabled(findResult.Config))
 	if err != nil {
 		return fmt.Errorf("read a checksum JSON: %w", err)
 	}
-	defer updateChecksum()
+	defer func() {
+		if err := updateChecksum(); err != nil {
+			namedErr = errors.Join(namedErr, err)
+		}
+	}()
 
 	if err := c.packageInstaller.InstallPackage(ctx, logger, &installpackage.ParamInstallPackage{
 		Pkg:             findResult.Package,

@@ -2,6 +2,7 @@ package cp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -13,14 +14,18 @@ import (
 	"github.com/aquaproj/aqua/v2/pkg/policy"
 )
 
-func (c *Controller) install(ctx context.Context, logger *slog.Logger, findResult *which.FindResult, policyConfigs []*policy.Config, param *config.Param) error {
+func (c *Controller) install(ctx context.Context, logger *slog.Logger, findResult *which.FindResult, policyConfigs []*policy.Config, param *config.Param) (namedErr error) {
 	checksums, updateChecksum, err := checksum.Open(
 		logger, findResult.ConfigFilePath,
 		param.ChecksumEnabled(findResult.Config))
 	if err != nil {
 		return fmt.Errorf("read a checksum JSON: %w", err)
 	}
-	defer updateChecksum()
+	defer func() {
+		if err := updateChecksum(); err != nil {
+			namedErr = errors.Join(namedErr, err)
+		}
+	}()
 
 	if err := c.packageInstaller.InstallPackage(ctx, logger, &installpackage.ParamInstallPackage{
 		Pkg:             findResult.Package,

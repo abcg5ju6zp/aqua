@@ -14,4 +14,16 @@ var (
 
 	// ErrNoChecksumIsFound indicates that no checksum was found for the requested resource.
 	ErrNoChecksumIsFound = errors.New("no checksum is found")
+
+	// ErrChecksumConflict classifies cases where this process confirmed a
+	// checksum for an ID that another process has persisted with a different
+	// value or algorithm. The file is left unchanged until the conflict is
+	// resolved.
+	ErrChecksumConflict = errors.New("checksum conflict")
+
+	// ErrPruneDeferred indicates that confirmed additions were committed but
+	// pruning was skipped because the configuration file changed while the
+	// command was running. Running update-checksum with pruning again
+	// completes the deletions.
+	ErrPruneDeferred = errors.New("the configuration file changed while aqua was running, so unused checksums weren't pruned; run `aqua update-checksum --prune` again to prune them")
 )

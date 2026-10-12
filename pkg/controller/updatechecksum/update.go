@@ -2,6 +2,7 @@ package updatechecksum
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -54,15 +55,19 @@ func (c *Controller) updateChecksum(ctx context.Context, logger *slog.Logger, cf
 		return err //nolint:wrapcheck
 	}
 
-	checksums := checksum.New()
-	checksums.EnableOutput()
-	checksumFilePath, err := checksum.GetChecksumFilePathFromConfigFilePath(cfgFilePath)
+	checksums, closeChecksums, err := checksum.Open(logger, cfgFilePath, true)
 	if err != nil {
-		return err //nolint:wrapcheck
-	}
-	if err := checksums.ReadFile(checksumFilePath); err != nil {
 		return fmt.Errorf("read a checksum JSON: %w", err)
 	}
+	checksums.EnableOutput()
+	defer func() {
+		if c.prune {
+			checksums.Prune()
+		}
+		if err := closeChecksums(); err != nil {
+			namedErr = errors.Join(namedErr, err)
+		}
+	}()
 
 	registryContents, err := c.registryInstaller.InstallRegistries(ctx, logger, cfg, cfgFilePath, checksums)
 	if err != nil {
@@ -70,14 +75,6 @@ func (c *Controller) updateChecksum(ctx context.Context, logger *slog.Logger, cf
 	}
 	pkgs, _ := config.ListPackagesNotOverride(logger, cfg, registryContents)
 	failed := false
-	defer func() {
-		if c.prune {
-			checksums.Prune()
-		}
-		if err := checksums.UpdateFile(checksumFilePath); err != nil {
-			namedErr = fmt.Errorf("update a checksum file: %w", err)
-		}
-	}()
 
 	var supportedEnvs []string
 	if cfg.Checksum != nil {

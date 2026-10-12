@@ -2,6 +2,7 @@ package initialize
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -33,7 +34,7 @@ func (c *Controller) Init(ctx context.Context, logger *slog.Logger, param *confi
 	return nil
 }
 
-func (c *Controller) create(ctx context.Context, logger *slog.Logger, cfgFilePath string, param *config.Param) error {
+func (c *Controller) create(ctx context.Context, logger *slog.Logger, cfgFilePath string, param *config.Param) (namedErr error) { //nolint:cyclop
 	cfg := &aqua.Config{}
 	if cfgFilePath == "" {
 		return finder.ErrConfigFileNotFound
@@ -48,7 +49,11 @@ func (c *Controller) create(ctx context.Context, logger *slog.Logger, cfgFilePat
 	if err != nil {
 		return fmt.Errorf("read a checksum JSON: %w", err)
 	}
-	defer updateChecksum()
+	defer func() {
+		if err := updateChecksum(); err != nil {
+			namedErr = errors.Join(namedErr, err)
+		}
+	}()
 
 	registryContents, err := c.registryInstaller.InstallRegistries(ctx, logger, cfg, cfgFilePath, checksums)
 	if err != nil {

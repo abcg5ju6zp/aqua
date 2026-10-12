@@ -102,13 +102,17 @@ func (c *Controller) getConfigFile(param *config.Param) (string, error) {
 	return param.GlobalConfigFilePaths[0], nil
 }
 
-func (c *Controller) listPkgs(ctx context.Context, logger *slog.Logger, param *config.Param, cfg *aqua.Config, cfgFilePath string, args ...string) ([]*config.Package, error) {
+func (c *Controller) listPkgs(ctx context.Context, logger *slog.Logger, param *config.Param, cfg *aqua.Config, cfgFilePath string, args ...string) (pkgList []*config.Package, namedErr error) {
 	checksums, updateChecksum, err := checksum.Open(
 		logger, cfgFilePath, param.ChecksumEnabled(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("read a checksum JSON: %w", err)
 	}
-	defer updateChecksum()
+	defer func() {
+		if err := updateChecksum(); err != nil {
+			namedErr = errors.Join(namedErr, err)
+		}
+	}()
 
 	registryContents, err := c.registryInstaller.InstallRegistries(ctx, logger, cfg, cfgFilePath, checksums)
 	if err != nil {

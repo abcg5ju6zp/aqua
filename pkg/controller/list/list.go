@@ -2,6 +2,7 @@ package list
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -10,7 +11,7 @@ import (
 	"github.com/aquaproj/aqua/v2/pkg/config/aqua"
 )
 
-func (c *Controller) List(ctx context.Context, logger *slog.Logger, param *config.Param) error {
+func (c *Controller) List(ctx context.Context, logger *slog.Logger, param *config.Param) (namedErr error) {
 	if param.Installed {
 		return c.listInstalled(logger, param)
 	}
@@ -30,7 +31,11 @@ func (c *Controller) List(ctx context.Context, logger *slog.Logger, param *confi
 	if err != nil {
 		return fmt.Errorf("read a checksum JSON: %w", err)
 	}
-	defer updateChecksum()
+	defer func() {
+		if err := updateChecksum(); err != nil {
+			namedErr = errors.Join(namedErr, err)
+		}
+	}()
 
 	registryContents, err := c.registryInstaller.InstallRegistries(ctx, logger, cfg, cfgFilePath, checksums)
 	if err != nil {

@@ -137,7 +137,7 @@ func (c *Controller) installAll(ctx context.Context, logger *slog.Logger, param 
 	return nil
 }
 
-func (c *Controller) install(ctx context.Context, logger *slog.Logger, cfgFilePath string, policyConfigs []*policy.Config, param *config.Param, names *nameFilter) error {
+func (c *Controller) install(ctx context.Context, logger *slog.Logger, cfgFilePath string, policyConfigs []*policy.Config, param *config.Param, names *nameFilter) (namedErr error) {
 	cfg := &aqua.Config{}
 	if cfgFilePath == "" {
 		return finder.ErrConfigFileNotFound
@@ -154,7 +154,11 @@ func (c *Controller) install(ctx context.Context, logger *slog.Logger, cfgFilePa
 	if err != nil {
 		return fmt.Errorf("read a checksum JSON: %w", err)
 	}
-	defer updateChecksum()
+	defer func() {
+		if err := updateChecksum(); err != nil {
+			namedErr = errors.Join(namedErr, err)
+		}
+	}()
 
 	registryContents, err := c.registryInstaller.InstallRegistries(ctx, logger, cfg, cfgFilePath, checksums)
 	if err != nil {

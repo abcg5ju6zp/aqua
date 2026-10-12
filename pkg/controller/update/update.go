@@ -70,13 +70,13 @@ func (c *Controller) updateCommand(ctx context.Context, logger *slog.Logger, par
 	return nil
 }
 
-func (c *Controller) update(ctx context.Context, logger *slog.Logger, param *config.Param, cfgFilePath string) error { //nolint:cyclop
+func (c *Controller) update(ctx context.Context, logger *slog.Logger, param *config.Param, cfgFilePath string) (namedErr error) { //nolint:cyclop
 	cfg := &aqua.Config{}
 	if cfgFilePath == "" {
 		return finder.ErrConfigFileNotFound
 	}
 	if err := c.configReader.Read(logger, cfgFilePath, cfg); err != nil {
-		return fmt.Errorf("read a configuration file: %w", err)
+		return err //nolint:wrapcheck
 	}
 
 	checksums, updateChecksum, err := checksum.Open(
@@ -85,7 +85,11 @@ func (c *Controller) update(ctx context.Context, logger *slog.Logger, param *con
 	if err != nil {
 		return fmt.Errorf("read a checksum JSON: %w", err)
 	}
-	defer updateChecksum()
+	defer func() {
+		if err := updateChecksum(); err != nil {
+			namedErr = errors.Join(namedErr, err)
+		}
+	}()
 
 	// Update packages before registries because if registries are updated before packages the function needs to install new registries then checksums of new registrires aren't added to aqua-checksums.json.
 

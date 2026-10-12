@@ -2,6 +2,7 @@ package which
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -127,7 +128,7 @@ func (c *Controller) getExePath(findResult *FindResult) (string, error) {
 
 // findExecFile finds the command in the configuration file.
 // It returns true as the second return value if the command name matches exactly.
-func (c *Controller) findExecFile(ctx context.Context, logger *slog.Logger, param *config.Param, cfgFilePath, exeName string) (*FindResult, bool, error) {
+func (c *Controller) findExecFile(ctx context.Context, logger *slog.Logger, param *config.Param, cfgFilePath, exeName string) (findResult *FindResult, found bool, namedErr error) {
 	cfg := &aqua.Config{}
 	if err := c.configReader.Read(logger, cfgFilePath, cfg); err != nil {
 		return nil, false, err //nolint:wrapcheck
@@ -139,7 +140,11 @@ func (c *Controller) findExecFile(ctx context.Context, logger *slog.Logger, para
 	if err != nil {
 		return nil, false, fmt.Errorf("read a checksum JSON: %w", err)
 	}
-	defer updateChecksum()
+	defer func() {
+		if err := updateChecksum(); err != nil {
+			namedErr = errors.Join(namedErr, err)
+		}
+	}()
 
 	logger.Debug("reading registry cache")
 	registryCache, err := registry.NewCache(param.RootDir, cfgFilePath)

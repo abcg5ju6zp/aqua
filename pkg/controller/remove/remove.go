@@ -19,7 +19,7 @@ import (
 	"github.com/suzuki-shunsuke/slog-error/slogerr"
 )
 
-func (c *Controller) Remove(ctx context.Context, logger *slog.Logger, param *config.Param) error { //nolint:cyclop
+func (c *Controller) Remove(ctx context.Context, logger *slog.Logger, param *config.Param) (namedErr error) { //nolint:cyclop
 	if param.All {
 		logger.Info("removing all packages")
 		return c.removeAll(param.RootDir)
@@ -61,7 +61,11 @@ func (c *Controller) Remove(ctx context.Context, logger *slog.Logger, param *con
 	if err != nil {
 		return fmt.Errorf("read a checksum JSON: %w", err)
 	}
-	defer updateChecksum()
+	defer func() {
+		if err := updateChecksum(); err != nil {
+			namedErr = errors.Join(namedErr, err)
+		}
+	}()
 
 	registryContents, err := c.registryInstaller.InstallRegistries(ctx, logger, cfg, cfgFilePath, checksums)
 	if err != nil {
